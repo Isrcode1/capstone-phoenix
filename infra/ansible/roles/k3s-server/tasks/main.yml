@@ -1,0 +1,39 @@
+---
+- name: Download k3s install script
+  get_url:
+    url: https://get.k3s.io
+    dest: /tmp/k3s_install.sh
+    mode: 0755
+
+- name: Install k3s server
+  command:
+    cmd: /tmp/k3s_install.sh
+    creates: /usr/local/bin/k3s
+  environment:
+    INSTALL_K3S_EXEC: "--write-kubeconfig-mode 644 --node-ip {{ ansible_private_ip }} --advertise-address {{ ansible_private_ip }}"
+
+- name: Wait for k3s token
+  wait_for:
+    path: /var/lib/rancher/k3s/server/node-token
+    timeout: 60
+
+- name: Fetch k3s token to local
+  fetch:
+    src: /var/lib/rancher/k3s/server/node-token
+    dest: /tmp/k3s_token
+    flat: yes
+
+- name: Fetch kubeconfig to local
+  fetch:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: ~/.kube/config
+    flat: yes
+    mode: 0600
+
+- name: Replace 127.0.0.1 with master public IP in kubeconfig
+  lineinfile:
+    path: ~/.kube/config
+    search_string: '127.0.0.1'
+    line: '    server: https://34.235.150.4:6443'
+  delegate_to: localhost
+  become: no
