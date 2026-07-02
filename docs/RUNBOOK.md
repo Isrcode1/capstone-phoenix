@@ -1,30 +1,79 @@
-# Runbook (fill this in — a teammate must rebuild from this alone)
+# Runbook — Capstone Phoenix
 
-## Provision from zero
+## Provision from Zero
+
 ```bash
-# 1. infra
-cd infra/terraform && terraform init && terraform apply
-# 2. cluster
-cd ../ansible && ansible-playbook -i inventory site.yml
-# 3. kubeconfig
-export KUBECONFIG=./kubeconfig && kubectl get nodes
-# 4. platform (ingress, cert-manager, metrics-server, argocd) — exact commands:
-#    ...
-# 5. GitOps takes over
-kubectl apply -f gitops/   # then Argo syncs the app
+# 1. Terraform
+cd infra/terraform
+terraform init
+terraform apply -auto-approve
+
+# 2. Ansible
+cd infra/ansible
+ansible-playbook -i inventory.ini playbook.yml
+
+# 3. Verify cluster
+kubectl get nodes
 ```
 
-## Day-2 operations
-- **Scale a tier:** … (and note: prefer a git commit so Argo stays the source of truth)
-- **Roll back a bad deploy:** …
-- **Run a new migration safely:** …
-- **Rotate a secret:** …
+## Deploy the App
 
-## Failure recovery (you'll demo one of these live)
-- **A worker node dies / is drained:** what happens, what you do, expected recovery time. …
-  ```bash
-  kubectl drain <node> --ignore-daemonsets --delete-emptydir-data   # the live-demo command
-  ```
-- **A backend Pod crashloops:** how you diagnose (`logs --previous`, `describe`, events). …
-- **A bad migration:** how you recover the DB. …
-- **Postgres Pod is rescheduled:** prove the PVC re-attaches and data is intact. …
+ArgoCD owns the cluster. Push to manifests/taskapp/ on main triggers auto-sync.
+
+```bash
+# Manual sync if needed
+kubectl -n argocd get app taskapp
+```
+
+## Scale the Backend
+
+```bash
+kubectl -n taskapp scale deployment backend --replicas=4
+kubectl -n taskapp get hpa backend-hpa
+```
+
+## Zero-Downtime Rollout
+
+```bash
+# Update image tag in manifests/taskapp/04-backend.yaml, push to git
+# Verify no downtime:
+while true; do curl -sk https://capstoneisrael.duckdns.org/api/health; sleep 1; done
+```
+
+## Roll Back a Bad Deploy
+
+```bash
+kubectl -n taskapp rollout undo deployment/backend
+kubectl -n taskapp rollout status deployment/backend
+```
+
+## Recover from a Dead Worker Node
+
+```bash
+kubectl drain <dead-node> --ignore-daemonsets --delete-emptydir-data
+kubectl get pods -n taskapp -o wide
+```
+
+## Recover from a Bad Migration
+
+```bash
+kubectl -n taskapp delete job db-migration
+kubectl apply -f manifests/taskapp/03-migration-job.yaml
+kubectl -n taskapp logs job/db-migration -f
+```
+
+## Verify Data Survives Pod Kill
+
+```bash
+kubectl -n taskapp delete pod postgres-0
+sleep 15
+kubectl -n taskapp get pod postgres-0
+curl -sk https://capstoneisrael.duckdns.org/api/health
+```
+
+## Renew TLS Certificate
+
+```bash
+kubectl -n taskapp get certificate taskapp-tls
+# cert-manager auto-renews 30 days before expiry
+```

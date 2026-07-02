@@ -1,47 +1,49 @@
-# Architecture (fill this in)
+# Architecture — Capstone Phoenix: TaskApp on Kubernetes
 
-## 1. Topology diagram
-> Draw it (ASCII, Excalidraw, draw.io — anything). Show: your nodes, where each TaskApp
-> tier runs, the ingress controller, and the request path.
+## Node Topology
 
-```
-[ replace with your diagram ]
+3-node k3s cluster on AWS EC2 (us-east-1):
 
-  Internet ──DNS──▶ taskapp.<you>.dev / api.<you>.dev
-        │
-        ▼
-  ingress controller (node: ____)  ──TLS terminated by cert-manager──┐
-        │                                                            │
-        ▼                                                            ▼
-  frontend Service ──▶ frontend Pods (nodes: __, __)        backend Service ──▶ backend Pods (nodes: __, __)
-                              │  /api proxy                              │
-                              └────────────────────────────────────────▶│
-                                                                         ▼
-                                                          postgres Service ──▶ postgres-0 (PVC on node __)
-```
+| Node | Role | Private IP | Public IP |
+|------|------|------------|-----------|
+| ip-10-0-1-147 | control-plane | 10.0.1.147 | 34.235.150.4 |
+| ip-10-0-1-126 | worker-1 | 10.0.1.126 | 98.92.176.178 |
+| ip-10-0-2-54 | worker-2 | 10.0.2.54 | (private only) |
 
-## 2. Node & network
-- Nodes (role, size, AZ/region): …
-- CIDR / subnet choices and why: …
-- Firewall: what's open to the world, what's internal, and why `6443` is closed: …
+## Request Flow
 
-## 3. Request flow (one paragraph)
-> DNS → ingress → TLS → frontend → /api → backend → Postgres. Be specific about names/ports.
+Browser → capstoneisrael.duckdns.org → 98.92.176.178 (worker-1)
+→ svclb-traefik (host port 443)
+→ Traefik pod (TLS termination, Let's Encrypt cert)
+→ /api/* → backend Service → Flask pod → postgres-0 (StatefulSet)
+→ /*    → frontend Service → nginx pod
 
-## 4. The single-server assumptions you fixed  ← graders look here
-> For each, name the assumption that was safe on one box but breaks on a cluster, and the
-> K8s mechanism you used. Minimum: migrations, persistent storage, traffic routing,
-> self-healing, zero-downtime deploys, secrets.
+## Core Requirements — What Single-Server Assumption Each Fixes
 
-| Single-server assumption | Why it breaks at scale | How you fixed it |
-|---|---|---|
-| migrate-on-boot in the entrypoint | 2+ replicas race on `alembic upgrade head` | … |
-| named volume on the host | Pods reschedule across nodes | … |
-| `ports:` published on the host | many Pods, many nodes, one front door needed | … |
-| … | … | … |
+| Requirement | Single-server problem fixed |
+|---|---|
+| StatefulSet + PVC | Data lost on container restart — PVC survives pod deletion |
+| 2 replicas + topologySpreadConstraints | One crash = total downtime — replicas spread across nodes |
+| Migration Job | Race condition — 2+ replicas would race on alembic upgrade head at startup |
+| Liveness/Readiness/Startup probes | Bad pods silently receive traffic — probes gate traffic to healthy pods only |
+| RollingUpdate maxUnavailable:0 | Deploy = downtime — new pod Ready before old removed |
+| Ingress + TLS cert-manager | Manual nginx/SSL per server — automated cert issuance and renewal |
+| HPA | Manual scaling — CPU-based autoscaler adds/removes replicas |
+| NetworkPolicy | All pods talk to all — postgres only reachable from backend |
+| PodDisruptionBudget | Node drain kills all replicas — minAvailable:1 guarantees survival |
+| ArgoCD GitOps | Manual kubectl apply = drift — git is source of truth |
 
-## 5. Choices & trade-offs
-- Raw YAML vs Helm vs kustomize — why: …
-- ingress-nginx vs k3s Traefik — why: …
-- CNI / NetworkPolicy enforcement — what and why: …
-- Secrets approach (out-of-band vs Sealed/External Secrets) — why: …
+## Components Per Node
+
+| Component | Node |
+|-----------|------|
+| k3s server, ArgoCD, cert-manager, CoreDNS | control-plane (ip-10-0-1-147) |
+| Traefik, backend x2, postgres-0, frontend x1 | worker-1 (ip-10-0-1-126) |
+| frontend x1 | worker-2 (ip-10-0-2-54) |
+
+## Networking
+
+- CNI: flannel (VXLAN, UDP 8472 between nodes)
+- Ingress: Traefik v3 (k3s built-in)
+- TLS: cert-manager + Let's Encrypt HTTP-01
+- DNS: CoreDNS forwarding to 1.1.1.1
